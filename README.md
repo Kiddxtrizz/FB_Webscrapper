@@ -71,6 +71,10 @@ The parser does not depend on site-specific CSS selectors. It reads the page's *
 
 Known site-specific handling: `rootedinroxbury.com` is redirected to `/shop/menu/all`.
 
+Curaleaf-platform menus (Curaleaf, Rebelle, …) have no "Add to cart" button. Their cards start with a quantity counter ("0 in cart") and a "<Category> by <Brand>" line, and the script recognizes and parses that layout automatically.
+
+The same product can appear on the "All products" page and again on its category page, so identical rows are removed before the CSV is written.
+
 If the script finds an "X–Y of Z results" counter but can't locate a working Next button, it **stops with an error** rather than saving a partial menu.
 
 ## Troubleshooting

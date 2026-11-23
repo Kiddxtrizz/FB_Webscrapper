@@ -35,6 +35,10 @@ NON_PRODUCT_LINES = {
     "add to cart",
     "add to bag",
 }
+# Curaleaf-platform menus (Curaleaf, Rebelle, ...) have no "Add to cart" button;
+# every card instead starts with a quantity counter such as "0 in cart".
+IN_CART_PATTERN = re.compile(r"(?im)^\s*\d+ in cart\s*$")
+CARD_PRICE_LINE_PATTERN = re.compile(r"(?i)^(?:from\s+)?\$\s*\d[\d,]*(?:\.\d{1,2})?$")
 PAGE_RANGE_PATTERN = re.compile(
     r"(\d+)\s*-\s*(\d+)\s+of\s+([\d,]+)\s+results",
     re.IGNORECASE,
@@ -244,7 +248,10 @@ def collect_menu_pages(driver):
 
 def has_product_cards(driver):
     page_text = driver.find_element(By.TAG_NAME, "body").text
-    has_cart_action = re.search(r"(?im)^\s*Add to (?:cart|bag)\s*$", page_text)
+    has_cart_action = (
+        re.search(r"(?im)^\s*Add to (?:cart|bag)\s*$", page_text)
+        or IN_CART_PATTERN.search(page_text)
+    )
     return bool(has_cart_action and PRICE_PATTERN.search(page_text))
 
 
@@ -324,8 +331,61 @@ def collect_category_menu_pages(driver):
     return "\n\n".join(page_texts)
 
 
+def extract_in_cart_products(page_text):
+    """Extract products from Curaleaf-style cards that start with "N in cart".
+
+    Card layout: [strain type] [series] "<Category> by <Brand>" <product name>
+    [THC/CBD/size/variant lines] "selected" [promo] <price>.
+    """
+    products = []
+    for block in IN_CART_PATTERN.split(page_text)[1:]:
+        lines = [line.strip() for line in block.splitlines() if line.strip()]
+        price_index = next(
+            (index for index, line in enumerate(lines) if CARD_PRICE_LINE_PATTERN.match(line)),
+            None,
+        )
+        if price_index is None:
+            continue
+        byline_index = next(
+            (
+                index for index, line in enumerate(lines[:price_index])
+                if re.fullmatch(r".+ by .+", line)
+            ),
+            None,
+        )
+        if byline_index is None or byline_index + 1 >= price_index:
+            continue
+
+        category, brand = lines[byline_index].split(" by ", 1)
+        product_name = lines[byline_index + 1]
+        size = ""
+        for line in [product_name, *lines[byline_index + 2:price_index]]:
+            if line.casefold().startswith(("thc", "cbd")):
+                continue
+            size_match = SIZE_PATTERN.search(line) or FRACTIONAL_SIZE_PATTERN.search(line)
+            if size_match:
+                size = size_match.group(1)
+                break
+
+        products.append({
+            "brand": brand.strip(),
+            "product": product_name,
+            "category": category.strip(),
+            "size": size,
+            "price": float(PRICE_PATTERN.search(lines[price_index]).group(1).replace(",", "")),
+            "price_text": lines[price_index],
+        })
+    return products
+
+
 def extract_products(page_text):
     """Extract product fields from menu text with one card per cart action."""
+    if (
+        not re.search(r"(?im)^\s*Add to (?:cart|bag)\s*$", page_text)
+        and IN_CART_PATTERN.search(page_text)
+    ):
+        return extract_in_cart_products(page_text)
+
     products = []
     card_blocks = re.split(r"(?im)^\s*Add to (?:cart|bag)\s*$", page_text)
 
@@ -507,6 +567,18 @@ def main():
             file.write(page_text)
 
         products = extract_products(page_text)
+        # "All products" plus each category page can list the same item more
+        # than once; keep only the first copy of each identical row.
+        seen_rows = set()
+        unique_products = []
+        for product in products:
+            row = tuple(product.values())
+            if row not in seen_rows:
+                seen_rows.add(row)
+                unique_products.append(product)
+        if len(unique_products) < len(products):
+            print(f"Removed {len(products) - len(unique_products)} duplicate product rows.")
+        products = unique_products
         with csv_path.open("w", newline="", encoding="utf-8") as file:
             columns = ["brand", "product", "category", "size", "price", "price_text"]
             writer = csv.DictWriter(file, fieldnames=columns)
