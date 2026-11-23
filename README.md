@@ -5,6 +5,7 @@ Tools for collecting competitor dispensary menu data.
 | Script | Status | Purpose |
 | --- | --- | --- |
 | `product_search.py` | Working | Scrapes every product from a dispensary's online menu into a CSV |
+| `batch_search.py` | Working | Runs the same scrape unattended for a whole list of stores |
 
 ## Requirements
 
@@ -60,6 +61,31 @@ CSV columns:
 | `size` | `3.5g` | From the product name or the price unit; blank if neither has one |
 | `price` | `45.0` | Numeric, first price on the card |
 | `price_text` | `$45.00 / 3.5g` | Raw price line as shown |
+
+## Running many stores: `batch_search.py`
+
+Put the stores in a spreadsheet (CSV or Excel) with a **menu URL** column and a **store name** column. Headers are matched loosely: anything containing `url`, `link`, `website` or `menu` is the URL; `store`, `dispensary`, `name` or `location` is the name. Other columns (address, distance, …) are ignored. Use the URL of the store's **menu page**, not its homepage, when you can.
+
+```bash
+python batch_search.py stores.xlsx
+```
+
+For each store the script opens the menu, clicks through common age gates ("I am 21+", "Yes", "Enter"), "recreational?" prompts and cookie banners, opens embedded Dutchie/Jane/etc. menus directly, then scrapes every category exactly like `product_search.py`. No typing is needed while it runs. Expect roughly 1–2 minutes per store.
+
+Results go into `batch_<date>/`:
+
+| File | Contents |
+| --- | --- |
+| `all_stores.csv` | Every product from every store, with `store` and `url` columns added |
+| `summary.csv` | One row per store: `status`, product count, time taken, notes |
+| `stores/<store>.csv` / `.txt` | Per-store files, same as `product_search.py` |
+| `screenshots/<store>.png` | What Chrome showed when a store failed |
+
+`status` is `ok`, `check` (fewer than 10 products, so look at it), `no products parsed` (page loaded but the layout wasn't recognized; see the `.txt`), or `failed` (no products appeared within 45 s, usually a pop-up it couldn't clear or a wrong URL; see `notes` and the screenshot).
+
+**Rerunning:** run the same command again the same day and stores that already finished (`ok`/`check`) are skipped, so only the failures are retried. This also lets you resume after **Ctrl + C**. Use `--fresh` to redo everything. For a store that keeps failing, fix its URL in the spreadsheet or run it by hand with `product_search.py`.
+
+`--headless` runs Chrome without a window, but more sites block that, so the default visible window is more reliable.
 
 ## How it works
 

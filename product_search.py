@@ -592,6 +592,64 @@ def get_export_paths(location):
     return Path(f"{name}.txt"), Path(f"{name}.csv")
 
 
+def page_body_loaded(browser):
+    """WebDriverWait condition: the page body exists (dismissing any JS alert)."""
+    try:
+        return browser.find_element(By.TAG_NAME, "body")
+    except UnexpectedAlertPresentException:
+        try:
+            alert = browser.switch_to.alert
+            print(f"Dismissing browser alert: {alert.text}")
+            alert.accept()
+        except NoAlertPresentException:
+            print("Browser alert closed before it could be dismissed; retrying.")
+        return False
+
+
+def apply_site_redirects(driver):
+    """Send known sites whose landing page has no products to their full menu."""
+    current_url = urlsplit(driver.current_url)
+    if (
+        current_url.hostname in {"rootedinroxbury.com", "www.rootedinroxbury.com"}
+        and current_url.path.rstrip("/") == ""
+    ):
+        driver.get(current_url._replace(path="/shop/menu/all", query="", fragment="").geturl())
+        try:
+            WebDriverWait(driver, 30).until(has_product_cards)
+        except TimeoutException as error:
+            raise RuntimeError(
+                "Opened Rooted In's All products menu, but no product cards loaded. "
+                "Confirm the menu is visible in Chrome and try again."
+            ) from error
+
+
+PRODUCT_COLUMNS = ["brand", "product", "category", "size", "price", "price_text"]
+
+
+def unique_products(products):
+    """Drop identical rows, keeping the first copy of each.
+
+    "All products" plus each category page can list the same item more than once.
+    """
+    seen_rows = set()
+    unique = []
+    for product in products:
+        row = tuple(product.values())
+        if row not in seen_rows:
+            seen_rows.add(row)
+            unique.append(product)
+    if len(unique) < len(products):
+        print(f"Removed {len(products) - len(unique)} duplicate product rows.")
+    return unique
+
+
+def write_products_csv(csv_path, products):
+    with csv_path.open("w", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(file, fieldnames=PRODUCT_COLUMNS)
+        writer.writeheader()
+        writer.writerows(products)
+
+
 def main():
     menu_url = input("Competitor menu URL: ").strip()
     if not menu_url:
@@ -600,40 +658,12 @@ def main():
     driver = webdriver.Chrome()
     try:
         driver.get(menu_url)
-
-        def page_body_loaded(browser):
-            try:
-                return browser.find_element(By.TAG_NAME, "body")
-            except UnexpectedAlertPresentException:
-                try:
-                    alert = browser.switch_to.alert
-                    print(f"Dismissing browser alert: {alert.text}")
-                    alert.accept()
-                except NoAlertPresentException:
-                    print("Browser alert closed before it could be dismissed; retrying.")
-                return False
-
-        WebDriverWait(driver, 15).until(
-            page_body_loaded
-        )
+        WebDriverWait(driver, 15).until(page_body_loaded)
         input(
             "In Chrome, complete any age/location prompts and open the menu. "
             "Press Enter here when the products are visible..."
         )
-        current_url = urlsplit(driver.current_url)
-        if (
-            current_url.hostname in {"rootedinroxbury.com", "www.rootedinroxbury.com"}
-            and current_url.path.rstrip("/") == ""
-        ):
-            driver.get(current_url._replace(path="/shop/menu/all", query="", fragment="").geturl())
-            try:
-                WebDriverWait(driver, 30).until(has_product_cards)
-            except TimeoutException as error:
-                raise RuntimeError(
-                    "Opened Rooted In's All products menu, but no product cards loaded. "
-                    "Confirm the menu is visible in Chrome and try again."
-                ) from error
-        host = urlsplit(driver.current_url).hostname
+        apply_site_redirects(driver)
         page_text = collect_category_menu_pages(driver)
 
         suggested_dispensary = extract_location_from_url(menu_url)
@@ -647,24 +677,8 @@ def main():
         with text_path.open("w", encoding="utf-8") as file:
             file.write(page_text)
 
-        products = extract_products(page_text)
-        # "All products" plus each category page can list the same item more
-        # than once; keep only the first copy of each identical row.
-        seen_rows = set()
-        unique_products = []
-        for product in products:
-            row = tuple(product.values())
-            if row not in seen_rows:
-                seen_rows.add(row)
-                unique_products.append(product)
-        if len(unique_products) < len(products):
-            print(f"Removed {len(products) - len(unique_products)} duplicate product rows.")
-        products = unique_products
-        with csv_path.open("w", newline="", encoding="utf-8") as file:
-            columns = ["brand", "product", "category", "size", "price", "price_text"]
-            writer = csv.DictWriter(file, fieldnames=columns)
-            writer.writeheader()
-            writer.writerows(products)
+        products = unique_products(extract_products(page_text))
+        write_products_csv(csv_path, products)
 
         print(
             f"Saved raw menu text to {text_path} and "
