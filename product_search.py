@@ -199,22 +199,41 @@ def page_has_advanced(driver, previous_marker, previous_start):
     return page_text != previous_marker
 
 
+MAX_SCROLLS = 200
+
+
+def count_product_cards(page_text):
+    """Count product cards by their cart actions, falling back to price lines."""
+    cart_actions = len(re.findall(r"(?im)^\s*Add to (?:cart|bag)\s*$", page_text))
+    cart_actions += len(IN_CART_PATTERN.findall(page_text))
+    return cart_actions or len(PRICE_PATTERN.findall(page_text))
+
+
 def scroll_menu_until_stable(driver, page_text):
+    scroll_count = 0
     while True:
         driver.execute_script(
             "window.scrollTo(0, document.body.scrollHeight);"
         )
+        # Only count it as "more content" when more products appear; rotating
+        # banners, carousels and timers change the text without adding products.
+        product_count = count_product_cards(page_text)
         try:
             WebDriverWait(driver, 5).until(
-                lambda browser: (
-                    get_body_text(browser) != page_text
-                )
+                lambda browser: count_product_cards(get_body_text(browser)) > product_count
             )
         except TimeoutException:
-            return page_text
+            return get_body_text(driver)
 
         page_text = get_body_text(driver)
-        print("Scrolled menu to load additional content.")
+        scroll_count += 1
+        print(
+            f"Scrolled menu to load additional content "
+            f"({count_product_cards(page_text)} products so far)."
+        )
+        if scroll_count >= MAX_SCROLLS:
+            print(f"Stopped scrolling after {MAX_SCROLLS} scrolls; moving on.")
+            return page_text
 
 
 def collect_menu_pages(driver):
