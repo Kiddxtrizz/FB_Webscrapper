@@ -45,8 +45,70 @@ PAGE_RANGE_PATTERN = re.compile(
 )
 
 
+# Some menus use an icon-only cart button (no "Add to cart" text). This script
+# finds those buttons and inserts a visible "Add to cart" label after each one,
+# so the text parser can split product cards the same way as on other sites.
+LABEL_ICON_CART_BUTTONS_JS = r"""
+const body = document.body;
+if (!body) return 0;
+const pageText = body.innerText || "";
+if (/^\s*\d+ in cart\s*$/im.test(pageText)) return 0;
+const hasTextCartButtons = [...document.querySelectorAll("button, [role='button'], a")]
+    .some((el) => !el.dataset.scraperCartLabel && /^\s*add to (cart|bag)\s*$/i.test(el.innerText || ""));
+if (hasTextCartButtons) return 0;
+
+const describe = (el) => [
+    el.getAttribute("aria-label"),
+    el.getAttribute("title"),
+    el.getAttribute("data-testid"),
+    el.getAttribute("data-icon"),
+    el.getAttribute("alt"),
+    el.getAttribute("href"),
+    el.getAttribute("xlink:href"),
+    typeof el.className === "string" ? el.className : el.getAttribute("class"),
+].join(" ");
+
+const candidates = [];
+for (const el of document.querySelectorAll("button, [role='button']")) {
+    if (el.dataset.scraperCart) continue;
+    if (el.closest("header, nav, footer, [role='dialog'], [role='banner']")) continue;
+    const text = (el.innerText || "").trim();
+    if (text && !/^\+$/.test(text)) continue;
+    const label = [
+        describe(el),
+        ...[...el.querySelectorAll("svg, i, img, use, title, span")].map(
+            (child) => describe(child) + " " + (child.tagName.toLowerCase() === "title" ? child.textContent : "")
+        ),
+    ].join(" ").toLowerCase();
+    if (!/cart|basket|shopping[-_ ]?bag|add[-_ ]?to[-_ ]?bag/.test(label)) continue;
+    if (/view cart|open cart|go to cart|checkout|remove|decrease|minus/.test(label)) continue;
+    candidates.push(el);
+}
+if (candidates.length < 2) return 0;
+
+for (const el of candidates) {
+    el.dataset.scraperCart = "1";
+    const marker = document.createElement("span");
+    marker.dataset.scraperCartLabel = "1";
+    marker.textContent = "Add to cart";
+    marker.style.cssText = "display:block;font-size:11px;";
+    el.after(marker);
+}
+return candidates.length;
+"""
+
+
+def get_body_text(driver):
+    """Return the page's visible text, labeling icon-only cart buttons first."""
+    try:
+        driver.execute_script(LABEL_ICON_CART_BUTTONS_JS)
+    except StaleElementReferenceException:
+        pass
+    return driver.find_element(By.TAG_NAME, "body").text
+
+
 def get_page_marker(driver):
-    page_text = driver.find_element(By.TAG_NAME, "body").text
+    page_text = get_body_text(driver)
     page_range = PAGE_RANGE_PATTERN.search(page_text)
     return page_range.group(0) if page_range else page_text
 
@@ -130,7 +192,7 @@ def find_next_page_control(driver, next_page_number=None, prefer_numbered=False)
 
 
 def page_has_advanced(driver, previous_marker, previous_start):
-    page_text = driver.find_element(By.TAG_NAME, "body").text
+    page_text = get_body_text(driver)
     page_range = PAGE_RANGE_PATTERN.search(page_text)
     if previous_start is not None and page_range:
         return int(page_range.group(1)) > previous_start
@@ -145,13 +207,13 @@ def scroll_menu_until_stable(driver, page_text):
         try:
             WebDriverWait(driver, 5).until(
                 lambda browser: (
-                    browser.find_element(By.TAG_NAME, "body").text != page_text
+                    get_body_text(browser) != page_text
                 )
             )
         except TimeoutException:
             return page_text
 
-        page_text = driver.find_element(By.TAG_NAME, "body").text
+        page_text = get_body_text(driver)
         print("Scrolled menu to load additional content.")
 
 
@@ -160,7 +222,7 @@ def collect_menu_pages(driver):
     seen_markers = set()
 
     while True:
-        page_text = driver.find_element(By.TAG_NAME, "body").text
+        page_text = get_body_text(driver)
         page_range = PAGE_RANGE_PATTERN.search(page_text)
         marker = page_range.group(0) if page_range else page_text
         if marker in seen_markers:
@@ -247,7 +309,7 @@ def collect_menu_pages(driver):
 
 
 def has_product_cards(driver):
-    page_text = driver.find_element(By.TAG_NAME, "body").text
+    page_text = get_body_text(driver)
     has_cart_action = (
         re.search(r"(?im)^\s*Add to (?:cart|bag)\s*$", page_text)
         or IN_CART_PATTERN.search(page_text)
