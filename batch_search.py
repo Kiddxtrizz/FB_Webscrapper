@@ -47,7 +47,17 @@ from product_search import (
 
 
 PRODUCT_WAIT_SECONDS = 45
+AUTO_SECONDS_BEFORE_HELP = 15
+DEFAULT_HELP_SECONDS = 30
 FEW_PRODUCTS_WARNING = 10
+# Human-verification / bot-check pages. The script does not try to get past
+# these; it labels the store "blocked" so you know to collect it another way.
+BOT_CHECK_PATTERN = re.compile(
+    r"verify (that )?you are (a )?human|are you a robot|i'?m not a robot|"
+    r"checking (if the site connection is secure|your browser)|just a moment\.\.\.|"
+    r"captcha|access denied|unusual traffic|press (and|&) hold",
+    re.IGNORECASE,
+)
 SUMMARY_COLUMNS = ["store", "url", "status", "products", "seconds", "notes"]
 
 # Clicks through age gates, "recreational or medical?" prompts and cookie
@@ -66,12 +76,24 @@ const visible = (el) => {
     return r.width > 0 && r.height > 0 && s.visibility !== "hidden" && s.display !== "none";
 };
 
+// Email sign-up / promo pop-ups: close them. Never on an age gate, where the
+// close button can send you off the site.
+const dismiss = /^(no,? thanks?( you)?|no thank you|maybe later|not now|not right now|close|close (dialog|modal|popup|window)|dismiss|skip|continue (to site|shopping|without)\b.*|×|✕|✖|x)$/i;
+const ageGateText = /\b(21|18)\+?\b|\bof (legal )?age\b|\bdate of birth\b|\bage verification\b|\bverify (your )?age\b/i;
+
 let clicked = [];
 for (const el of document.querySelectorAll("button, a, [role='button'], input[type='button'], input[type='submit'], label")) {
     if (!visible(el)) continue;
-    const text = (el.innerText || el.value || el.getAttribute("aria-label") || "").trim().replace(/\s+/g, " ");
-    if (!text || text.length > 40 || avoid.test(text)) continue;
-    const inOverlay = !!el.closest(overlay);
+    const text = (el.innerText || el.value || el.getAttribute("aria-label") || el.getAttribute("title") || "").trim().replace(/\s+/g, " ");
+    if (!text || text.length > 40) continue;
+    const popup = el.closest(overlay);
+    if (popup && dismiss.test(text) && !ageGateText.test(popup.innerText || "")) {
+        el.click();
+        clicked.push(text);
+        continue;
+    }
+    if (avoid.test(text)) continue;
+    const inOverlay = !!popup;
     if (explicit.test(text) || (inOverlay && generic.test(text))) {
         // Age gates sometimes need a "remember me"/"I am 21" checkbox ticked first.
         const box = el.closest(overlay)?.querySelector("input[type='checkbox']:not(:checked)");
@@ -184,11 +206,39 @@ def open_embedded_menu(driver):
     return False
 
 
-def wait_for_products(driver):
+def wait_for_help(driver, name, help_seconds):
+    """Give the person watching time to click through pop-ups by hand.
+
+    Automatic clicking is paused so it doesn't fight them. Continues as soon as
+    products appear. Returns True if products showed up.
+    """
+    print(
+        f"\a\n  >>> {name} NEEDS YOUR HELP: in Chrome, clear any pop-ups and open the menu.\n"
+        f"  >>> Waiting up to {help_seconds}s; it continues on its own once products show."
+    )
+    deadline = time.monotonic() + help_seconds
+    next_reminder = 10
+    while time.monotonic() < deadline:
+        try:
+            if has_product_cards(driver):
+                print("  Products found, thanks! Continuing.")
+                return True
+        except WebDriverException:
+            pass  # page is mid-navigation while they click
+        elapsed = help_seconds - (deadline - time.monotonic())
+        if elapsed >= next_reminder:
+            print(f"  ...{max(0, round(deadline - time.monotonic()))}s left")
+            next_reminder += 10
+        time.sleep(1)
+    return False
+
+
+def wait_for_products(driver, name, help_seconds):
     """Clear pop-ups until products show up. Returns a list of notes."""
     notes = []
     opened_iframe = False
-    deadline = time.monotonic() + PRODUCT_WAIT_SECONDS
+    auto_seconds = AUTO_SECONDS_BEFORE_HELP if help_seconds else PRODUCT_WAIT_SECONDS
+    deadline = time.monotonic() + auto_seconds
     while time.monotonic() < deadline:
         try:
             if has_product_cards(driver):
@@ -204,19 +254,28 @@ def wait_for_products(driver):
             notes.append("opened embedded menu")
             WebDriverWait(driver, 15).until(page_body_loaded)
         time.sleep(3)
+
+    if help_seconds:
+        if wait_for_help(driver, name, help_seconds):
+            notes.append("needed manual help")
+            return notes
+        raise TimeoutException(
+            f"no products found, even after {help_seconds}s of manual help "
+            "(pop-up not cleared, wrong URL, or unsupported menu layout)"
+        )
     raise TimeoutException(
         f"no products found after {PRODUCT_WAIT_SECONDS}s "
         "(age/location pop-up not cleared, wrong URL, or unsupported menu layout)"
     )
 
 
-def scrape_store(driver, name, url, store_dir, screenshot_dir):
+def scrape_store(driver, name, url, store_dir, screenshot_dir, help_seconds):
     started = time.monotonic()
     notes = []
     try:
         driver.get(url)
         WebDriverWait(driver, 20).until(page_body_loaded)
-        notes += wait_for_products(driver)
+        notes += wait_for_products(driver, name, help_seconds)
         apply_site_redirects(driver)
         page_text = collect_category_menu_pages(driver)
 
@@ -239,6 +298,13 @@ def scrape_store(driver, name, url, store_dir, screenshot_dir):
         product_count = 0
         message = (getattr(error, "msg", None) or str(error) or type(error).__name__).strip()
         notes.append(message.splitlines()[0])
+        try:
+            page_text = driver.find_element(By.TAG_NAME, "body").text
+        except WebDriverException:
+            page_text = ""
+        if BOT_CHECK_PATTERN.search(page_text):
+            status = "blocked"
+            notes.insert(0, "site showed a 'verify you are human' / bot check")
         try:
             driver.save_screenshot(str(screenshot_dir / f"{safe_filename(name)}.png"))
         except WebDriverException:
@@ -297,7 +363,19 @@ def main():
         action="store_true",
         help="run Chrome without a window (some sites block this; visible is more reliable)",
     )
+    parser.add_argument(
+        "--help-time",
+        type=int,
+        default=DEFAULT_HELP_SECONDS,
+        metavar="SECONDS",
+        help=(
+            "when a store's products don't appear on their own, pause this long so you "
+            f"can click through pop-ups in Chrome (default {DEFAULT_HELP_SECONDS}; "
+            "0 = don't wait, for unattended runs)"
+        ),
+    )
     args = parser.parse_args()
+    help_seconds = 0 if args.headless else max(0, args.help_time)
     chrome_options = webdriver.ChromeOptions()
     if args.headless:
         chrome_options.add_argument("--headless=new")
@@ -330,7 +408,7 @@ def main():
                 # Clear the previous site's cookies (age-gate answers, selected store).
                 driver.delete_all_cookies()
 
-            result = scrape_store(driver, name, url, store_dir, screenshot_dir)
+            result = scrape_store(driver, name, url, store_dir, screenshot_dir, help_seconds)
             results[name] = result
             write_summary(summary_path, results)  # saved after every store
             print(f"  -> {result['status']}: {result['products']} products ({result['seconds']}s)")

@@ -70,7 +70,9 @@ Put the stores in a spreadsheet (CSV or Excel) with a **menu URL** column and a 
 python batch_search.py stores.xlsx
 ```
 
-For each store the script opens the menu, clicks through common age gates ("I am 21+", "Yes", "Enter"), "recreational?" prompts and cookie banners, opens embedded Dutchie/Jane/etc. menus directly, then scrapes every category exactly like `product_search.py`. No typing is needed while it runs. Expect roughly 1–2 minutes per store.
+For each store the script opens the menu, clicks through common age gates ("I am 21+", "Yes", "Enter"), "recreational?" prompts, cookie banners and email sign-up pop-ups ("No thanks", "Close"; never the close button on an age gate), opens embedded Dutchie/Jane/etc. menus directly, then scrapes every category exactly like `product_search.py`. No typing is needed while it runs. Expect roughly 1–2 minutes per store.
+
+**Helping it through pop-ups:** if a store's products haven't appeared after ~15 s of automatic tries, the script beeps, prints `>>> <store> NEEDS YOUR HELP`, stops clicking, and waits **30 s** for you to clear the pop-ups in Chrome. It carries on by itself as soon as products show. Change the wait with `--help-time 60`, or use `--help-time 0` for an unattended run (stores it can't clear are just logged as failed).
 
 Results go into `batch_<date>/`:
 
@@ -81,7 +83,7 @@ Results go into `batch_<date>/`:
 | `stores/<store>.csv` / `.txt` | Per-store files, same as `product_search.py` |
 | `screenshots/<store>.png` | What Chrome showed when a store failed |
 
-`status` is `ok`, `check` (fewer than 10 products, so look at it), `no products parsed` (page loaded but the layout wasn't recognized; see the `.txt`), or `failed` (no products appeared within 45 s, usually a pop-up it couldn't clear or a wrong URL; see `notes` and the screenshot).
+`status` is `ok`, `check` (fewer than 10 products, so look at it), `no products parsed` (page loaded but the layout wasn't recognized; see the `.txt`), `blocked` (the site showed a "verify you are human" / bot check; the script doesn't try to get past these, so collect that store another way), or `failed` (no products appeared within 45 s, usually a pop-up it couldn't clear or a wrong URL; see `notes` and the screenshot).
 
 **Rerunning:** run the same command again the same day and stores that already finished (`ok`/`check`) are skipped, so only the failures are retried. This also lets you resume after **Ctrl + C**. Use `--fresh` to redo everything. For a store that keeps failing, fix its URL in the spreadsheet or run it by hand with `product_search.py`.
 
