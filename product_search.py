@@ -35,14 +35,80 @@ NON_PRODUCT_LINES = {
     "add to cart",
     "add to bag",
 }
+# Curaleaf-platform menus (Curaleaf, Rebelle, ...) have no "Add to cart" button;
+# every card instead starts with a quantity counter such as "0 in cart".
+IN_CART_PATTERN = re.compile(r"(?im)^\s*\d+ in cart\s*$")
+CARD_PRICE_LINE_PATTERN = re.compile(r"(?i)^(?:from\s+)?\$\s*\d[\d,]*(?:\.\d{1,2})?$")
 PAGE_RANGE_PATTERN = re.compile(
     r"(\d+)\s*-\s*(\d+)\s+of\s+([\d,]+)\s+results",
     re.IGNORECASE,
 )
 
 
+# Some menus use an icon-only cart button (no "Add to cart" text). This script
+# finds those buttons and inserts a visible "Add to cart" label after each one,
+# so the text parser can split product cards the same way as on other sites.
+LABEL_ICON_CART_BUTTONS_JS = r"""
+const body = document.body;
+if (!body) return 0;
+const pageText = body.innerText || "";
+if (/^\s*\d+ in cart\s*$/im.test(pageText)) return 0;
+const hasTextCartButtons = [...document.querySelectorAll("button, [role='button'], a")]
+    .some((el) => !el.dataset.scraperCartLabel && /^\s*add to (cart|bag)\s*$/i.test(el.innerText || ""));
+if (hasTextCartButtons) return 0;
+
+const describe = (el) => [
+    el.getAttribute("aria-label"),
+    el.getAttribute("title"),
+    el.getAttribute("data-testid"),
+    el.getAttribute("data-icon"),
+    el.getAttribute("alt"),
+    el.getAttribute("href"),
+    el.getAttribute("xlink:href"),
+    typeof el.className === "string" ? el.className : el.getAttribute("class"),
+].join(" ");
+
+const candidates = [];
+for (const el of document.querySelectorAll("button, [role='button']")) {
+    if (el.dataset.scraperCart) continue;
+    if (el.closest("header, nav, footer, [role='dialog'], [role='banner']")) continue;
+    const text = (el.innerText || "").trim();
+    if (text && !/^\+$/.test(text)) continue;
+    const label = [
+        describe(el),
+        ...[...el.querySelectorAll("svg, i, img, use, title, span")].map(
+            (child) => describe(child) + " " + (child.tagName.toLowerCase() === "title" ? child.textContent : "")
+        ),
+    ].join(" ").toLowerCase();
+    if (!/cart|basket|shopping[-_ ]?bag|add[-_ ]?to[-_ ]?bag/.test(label)) continue;
+    if (/view cart|open cart|go to cart|checkout|remove|decrease|minus/.test(label)) continue;
+    candidates.push(el);
+}
+if (candidates.length < 2) return 0;
+
+for (const el of candidates) {
+    el.dataset.scraperCart = "1";
+    const marker = document.createElement("span");
+    marker.dataset.scraperCartLabel = "1";
+    marker.textContent = "Add to cart";
+    marker.style.cssText = "display:block;font-size:11px;";
+    el.after(marker);
+}
+return candidates.length;
+"""
+
+
+def get_body_text(driver):
+    """Return the page's visible text, labeling icon-only cart buttons first."""
+    try:
+        driver.execute_script(LABEL_ICON_CART_BUTTONS_JS)
+    except StaleElementReferenceException:
+        pass
+    return driver.find_element(By.TAG_NAME, "body").text
+
+
 def get_page_marker(driver):
-    page_text = driver.find_element(By.TAG_NAME, "body").text
+    page_text = get_body_text(driver)
     page_range = PAGE_RANGE_PATTERN.search(page_text)
     return page_range.group(0) if page_range else page_text
 
@@ -126,29 +192,48 @@ def find_next_page_control(driver, next_page_number=None, prefer_numbered=False)
 
 
 def page_has_advanced(driver, previous_marker, previous_start):
-    page_text = driver.find_element(By.TAG_NAME, "body").text
+    page_text = get_body_text(driver)
     page_range = PAGE_RANGE_PATTERN.search(page_text)
     if previous_start is not None and page_range:
         return int(page_range.group(1)) > previous_start
     return page_text != previous_marker
 
 
+MAX_SCROLLS = 200
+
+
+def count_product_cards(page_text):
+    """Count product cards by their cart actions, falling back to price lines."""
+    cart_actions = len(re.findall(r"(?im)^\s*Add to (?:cart|bag)\s*$", page_text))
+    cart_actions += len(IN_CART_PATTERN.findall(page_text))
+    return cart_actions or len(PRICE_PATTERN.findall(page_text))
+
+
 def scroll_menu_until_stable(driver, page_text):
+    scroll_count = 0
     while True:
         driver.execute_script(
             "window.scrollTo(0, document.body.scrollHeight);"
         )
+        # Only count it as "more content" when more products appear; rotating
+        # banners, carousels and timers change the text without adding products.
+        product_count = count_product_cards(page_text)
         try:
             WebDriverWait(driver, 5).until(
-                lambda browser: (
-                    browser.find_element(By.TAG_NAME, "body").text != page_text
-                )
+                lambda browser: count_product_cards(get_body_text(browser)) > product_count
             )
         except TimeoutException:
-            return page_text
+            return get_body_text(driver)
 
-        page_text = driver.find_element(By.TAG_NAME, "body").text
-        print("Scrolled menu to load additional content.")
+        page_text = get_body_text(driver)
+        scroll_count += 1
+        print(
+            f"Scrolled menu to load additional content "
+            f"({count_product_cards(page_text)} products so far)."
+        )
+        if scroll_count >= MAX_SCROLLS:
+            print(f"Stopped scrolling after {MAX_SCROLLS} scrolls; moving on.")
+            return page_text
 
 
 def collect_menu_pages(driver):
@@ -156,7 +241,7 @@ def collect_menu_pages(driver):
     seen_markers = set()
 
     while True:
-        page_text = driver.find_element(By.TAG_NAME, "body").text
+        page_text = get_body_text(driver)
         page_range = PAGE_RANGE_PATTERN.search(page_text)
         marker = page_range.group(0) if page_range else page_text
         if marker in seen_markers:
@@ -243,8 +328,11 @@ def collect_menu_pages(driver):
 
 
 def has_product_cards(driver):
-    page_text = driver.find_element(By.TAG_NAME, "body").text
-    has_cart_action = re.search(r"(?im)^\s*Add to (?:cart|bag)\s*$", page_text)
+    page_text = get_body_text(driver)
+    has_cart_action = (
+        re.search(r"(?im)^\s*Add to (?:cart|bag)\s*$", page_text)
+        or IN_CART_PATTERN.search(page_text)
+    )
     return bool(has_cart_action and PRICE_PATTERN.search(page_text))
 
 
@@ -324,8 +412,61 @@ def collect_category_menu_pages(driver):
     return "\n\n".join(page_texts)
 
 
+def extract_in_cart_products(page_text):
+    """Extract products from Curaleaf-style cards that start with "N in cart".
+
+    Card layout: [strain type] [series] "<Category> by <Brand>" <product name>
+    [THC/CBD/size/variant lines] "selected" [promo] <price>.
+    """
+    products = []
+    for block in IN_CART_PATTERN.split(page_text)[1:]:
+        lines = [line.strip() for line in block.splitlines() if line.strip()]
+        price_index = next(
+            (index for index, line in enumerate(lines) if CARD_PRICE_LINE_PATTERN.match(line)),
+            None,
+        )
+        if price_index is None:
+            continue
+        byline_index = next(
+            (
+                index for index, line in enumerate(lines[:price_index])
+                if re.fullmatch(r".+ by .+", line)
+            ),
+            None,
+        )
+        if byline_index is None or byline_index + 1 >= price_index:
+            continue
+
+        category, brand = lines[byline_index].split(" by ", 1)
+        product_name = lines[byline_index + 1]
+        size = ""
+        for line in [product_name, *lines[byline_index + 2:price_index]]:
+            if line.casefold().startswith(("thc", "cbd")):
+                continue
+            size_match = SIZE_PATTERN.search(line) or FRACTIONAL_SIZE_PATTERN.search(line)
+            if size_match:
+                size = size_match.group(1)
+                break
+
+        products.append({
+            "brand": brand.strip(),
+            "product": product_name,
+            "category": category.strip(),
+            "size": size,
+            "price": float(PRICE_PATTERN.search(lines[price_index]).group(1).replace(",", "")),
+            "price_text": lines[price_index],
+        })
+    return products
+
+
 def extract_products(page_text):
     """Extract product fields from menu text with one card per cart action."""
+    if (
+        not re.search(r"(?im)^\s*Add to (?:cart|bag)\s*$", page_text)
+        and IN_CART_PATTERN.search(page_text)
+    ):
+        return extract_in_cart_products(page_text)
+
     products = []
     card_blocks = re.split(r"(?im)^\s*Add to (?:cart|bag)\s*$", page_text)
 
@@ -451,6 +592,64 @@ def get_export_paths(location):
     return Path(f"{name}.txt"), Path(f"{name}.csv")
 
 
+def page_body_loaded(browser):
+    """WebDriverWait condition: the page body exists (dismissing any JS alert)."""
+    try:
+        return browser.find_element(By.TAG_NAME, "body")
+    except UnexpectedAlertPresentException:
+        try:
+            alert = browser.switch_to.alert
+            print(f"Dismissing browser alert: {alert.text}")
+            alert.accept()
+        except NoAlertPresentException:
+            print("Browser alert closed before it could be dismissed; retrying.")
+        return False
+
+
+def apply_site_redirects(driver):
+    """Send known sites whose landing page has no products to their full menu."""
+    current_url = urlsplit(driver.current_url)
+    if (
+        current_url.hostname in {"rootedinroxbury.com", "www.rootedinroxbury.com"}
+        and current_url.path.rstrip("/") == ""
+    ):
+        driver.get(current_url._replace(path="/shop/menu/all", query="", fragment="").geturl())
+        try:
+            WebDriverWait(driver, 30).until(has_product_cards)
+        except TimeoutException as error:
+            raise RuntimeError(
+                "Opened Rooted In's All products menu, but no product cards loaded. "
+                "Confirm the menu is visible in Chrome and try again."
+            ) from error
+
+
+PRODUCT_COLUMNS = ["brand", "product", "category", "size", "price", "price_text"]
+
+
+def unique_products(products):
+    """Drop identical rows, keeping the first copy of each.
+
+    "All products" plus each category page can list the same item more than once.
+    """
+    seen_rows = set()
+    unique = []
+    for product in products:
+        row = tuple(product.values())
+        if row not in seen_rows:
+            seen_rows.add(row)
+            unique.append(product)
+    if len(unique) < len(products):
+        print(f"Removed {len(products) - len(unique)} duplicate product rows.")
+    return unique
+
+
+def write_products_csv(csv_path, products):
+    with csv_path.open("w", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(file, fieldnames=PRODUCT_COLUMNS)
+        writer.writeheader()
+        writer.writerows(products)
+
+
 def main():
     menu_url = input("Competitor menu URL: ").strip()
     if not menu_url:
@@ -459,40 +658,12 @@ def main():
     driver = webdriver.Chrome()
     try:
         driver.get(menu_url)
-
-        def page_body_loaded(browser):
-            try:
-                return browser.find_element(By.TAG_NAME, "body")
-            except UnexpectedAlertPresentException:
-                try:
-                    alert = browser.switch_to.alert
-                    print(f"Dismissing browser alert: {alert.text}")
-                    alert.accept()
-                except NoAlertPresentException:
-                    print("Browser alert closed before it could be dismissed; retrying.")
-                return False
-
-        WebDriverWait(driver, 15).until(
-            page_body_loaded
-        )
+        WebDriverWait(driver, 15).until(page_body_loaded)
         input(
             "In Chrome, complete any age/location prompts and open the menu. "
             "Press Enter here when the products are visible..."
         )
-        current_url = urlsplit(driver.current_url)
-        if (
-            current_url.hostname in {"rootedinroxbury.com", "www.rootedinroxbury.com"}
-            and current_url.path.rstrip("/") == ""
-        ):
-            driver.get(current_url._replace(path="/shop/menu/all", query="", fragment="").geturl())
-            try:
-                WebDriverWait(driver, 30).until(has_product_cards)
-            except TimeoutException as error:
-                raise RuntimeError(
-                    "Opened Rooted In's All products menu, but no product cards loaded. "
-                    "Confirm the menu is visible in Chrome and try again."
-                ) from error
-        host = urlsplit(driver.current_url).hostname
+        apply_site_redirects(driver)
         page_text = collect_category_menu_pages(driver)
 
         suggested_dispensary = extract_location_from_url(menu_url)
@@ -506,12 +677,8 @@ def main():
         with text_path.open("w", encoding="utf-8") as file:
             file.write(page_text)
 
-        products = extract_products(page_text)
-        with csv_path.open("w", newline="", encoding="utf-8") as file:
-            columns = ["brand", "product", "category", "size", "price", "price_text"]
-            writer = csv.DictWriter(file, fieldnames=columns)
-            writer.writeheader()
-            writer.writerows(products)
+        products = unique_products(extract_products(page_text))
+        write_products_csv(csv_path, products)
 
         print(
             f"Saved raw menu text to {text_path} and "

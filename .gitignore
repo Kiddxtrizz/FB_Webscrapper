@@ -226,3 +226,6 @@ __marimo__/
 *_[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_*.txt
 *_[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_*.csv
 output/
+
+# Batch run output (scraped data, screenshots)
+batch_*/

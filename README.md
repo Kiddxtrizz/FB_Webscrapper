@@ -5,6 +5,7 @@ Tools for collecting competitor dispensary menu data.
 | Script | Status | Purpose |
 | --- | --- | --- |
 | `product_search.py` | Working | Scrapes every product from a dispensary's online menu into a CSV |
+| `batch_search.py` | Working | Runs the same scrape unattended for a whole list of stores |
 
 ## Requirements
 
@@ -61,6 +62,33 @@ CSV columns:
 | `price` | `45.0` | Numeric, first price on the card |
 | `price_text` | `$45.00 / 3.5g` | Raw price line as shown |
 
+## Running many stores: `batch_search.py`
+
+Put the stores in a spreadsheet (CSV or Excel) with a **menu URL** column and a **store name** column. Headers are matched loosely: anything containing `url`, `link`, `website` or `menu` is the URL; `store`, `dispensary`, `name` or `location` is the name. Other columns (address, distance, …) are ignored. Use the URL of the store's **menu page**, not its homepage, when you can.
+
+```bash
+python batch_search.py stores.xlsx
+```
+
+For each store the script opens the menu, clicks through common age gates ("I am 21+", "Yes", "Enter"), "recreational?" prompts, cookie banners and email sign-up pop-ups ("No thanks", "Close"; never the close button on an age gate), opens embedded Dutchie/Jane/etc. menus directly, then scrapes every category exactly like `product_search.py`. No typing is needed while it runs. Expect roughly 1–2 minutes per store.
+
+**Helping it through pop-ups:** if a store's products haven't appeared after ~15 s of automatic tries, the script beeps, prints `>>> <store> NEEDS YOUR HELP`, stops clicking, and waits **30 s** for you to clear the pop-ups in Chrome. It carries on by itself as soon as products show. Change the wait with `--help-time 60`, or use `--help-time 0` for an unattended run (stores it can't clear are just logged as failed).
+
+Results go into `batch_<date>/`:
+
+| File | Contents |
+| --- | --- |
+| `all_stores.csv` | Every product from every store, with `store` and `url` columns added |
+| `summary.csv` | One row per store: `status`, product count, time taken, notes |
+| `stores/<store>.csv` / `.txt` | Per-store files, same as `product_search.py` |
+| `screenshots/<store>.png` | What Chrome showed when a store failed |
+
+`status` is `ok`, `check` (fewer than 10 products, so look at it), `no products parsed` (page loaded but the layout wasn't recognized; see the `.txt`), `blocked` (the site showed a "verify you are human" / bot check; the script doesn't try to get past these, so collect that store another way), or `failed` (no products appeared within 45 s, usually a pop-up it couldn't clear or a wrong URL; see `notes` and the screenshot).
+
+**Rerunning:** run the same command again the same day and stores that already finished (`ok`/`check`) are skipped, so only the failures are retried. This also lets you resume after **Ctrl + C**. Use `--fresh` to redo everything. For a store that keeps failing, fix its URL in the spreadsheet or run it by hand with `product_search.py`.
+
+`--headless` runs Chrome without a window, but more sites block that, so the default visible window is more reliable.
+
 ## How it works
 
 The parser does not depend on site-specific CSS selectors. It reads the page's **visible text** and splits it into product cards at each `Add to cart` / `Add to bag` line. This works across most hosted menu platforms. Expect it to break if a site:
@@ -70,6 +98,12 @@ The parser does not depend on site-specific CSS selectors. It reads the page's *
 - shows prices without a `$`.
 
 Known site-specific handling: `rootedinroxbury.com` is redirected to `/shop/menu/all`.
+
+Curaleaf-platform menus (Curaleaf, Rebelle, …) have no "Add to cart" button. Their cards start with a quantity counter ("0 in cart") and a "<Category> by <Brand>" line, and the script recognizes and parses that layout automatically.
+
+If a menu has no "Add to cart" text but uses an icon-only cart/bag/basket button on each product (recognized from its aria-label, title, test ID, class or icon name), the script inserts an "Add to cart" label next to each icon so the cards can be split. Cart icons in the header, nav, footer or pop-ups are ignored.
+
+The same product can appear on the "All products" page and again on its category page, so identical rows are removed before the CSV is written.
 
 If the script finds an "X–Y of Z results" counter but can't locate a working Next button, it **stops with an error** rather than saving a partial menu.
 
